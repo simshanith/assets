@@ -1,0 +1,54 @@
+name: cleanup
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List the branches that would be deleted, without deleting
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+      RETENTION_DAYS: '90'
+    steps:
+      - name: Delete branches of pull requests closed past retention
+        run: |
+          cutoff=$(date -u -d "$RETENTION_DAYS days ago" +%s)
+          gh api "repos/$GITHUB_REPOSITORY/branches" --paginate --jq '.[].name' |
+            while read -r branch; do
+              if [[ ! $branch =~ ^([^/]+)/([^/]+)/pr/([0-9]+)$ ]]; then
+                continue
+              fi
+              pr="repos/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/pulls/${BASH_REMATCH[3]}"
+              if ! closed_at=$(gh api "$pr" --jq '.closed_at // ""'); then
+                echo "skip $branch: pull request lookup failed"
+                continue
+              fi
+              if [[ -z $closed_at ]]; then
+                continue
+              fi
+              if (($(date -u -d "$closed_at" +%s) >= cutoff)); then
+                continue
+              fi
+              if [[ $DRY_RUN == true ]]; then
+                echo "would delete $branch (closed $closed_at)"
+              else
+                echo "delete $branch (closed $closed_at)"
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch"
+              fi
+            done
